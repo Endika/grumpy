@@ -140,6 +140,8 @@ func TestBinaryOps(t *testing.T) {
 		{Mul, newObject(ObjectType), newObject(fooType), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for *: 'object' and 'Foo'")},
 		{Or, NewInt(-42).ToObject(), NewInt(244).ToObject(), NewInt(-10).ToObject(), nil},
 		{Or, NewInt(42).ToObject(), NewStr("foo").ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for |: 'int' and 'str'")},
+		{Pow, NewInt(2).ToObject(), NewInt(-2).ToObject(), NewFloat(0.25).ToObject(), nil},
+		{Pow, NewInt(2).ToObject(), newObject(fooType), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for **: 'int' and 'Foo'")},
 		{Sub, NewInt(3).ToObject(), NewInt(-3).ToObject(), NewInt(6).ToObject(), nil},
 		{Xor, NewInt(-42).ToObject(), NewInt(244).ToObject(), NewInt(-222).ToObject(), nil},
 		{Xor, NewInt(42).ToObject(), NewStr("foo").ToObject(), nil, mustCreateException(TypeErrorType, "unsupported operand type(s) for ^: 'int' and 'str'")},
@@ -147,6 +149,85 @@ func TestBinaryOps(t *testing.T) {
 	for _, cas := range cases {
 		testCase := invokeTestCase{wrapArgs(cas.v, cas.w), nil, cas.want, cas.wantExc}
 		if err := runInvokeTestCase(wrapFuncForTest(cas.fun), &testCase); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestCompare(t *testing.T) {
+	badCmpType := newTestClass("BadCmp", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(TypeErrorType, "uh oh")
+		}).ToObject(),
+	}))
+	cmpLtType := newTestClass("Lt", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(-1).ToObject(), nil
+		}).ToObject(),
+	}))
+	cmpEqType := newTestClass("Eq", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(0).ToObject(), nil
+		}).ToObject(),
+	}))
+	cmpGtType := newTestClass("Gt", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(1).ToObject(), nil
+		}).ToObject(),
+	}))
+	cmpByEqType := newTestClass("EqCmp", []*Type{IntType}, newStringDict(map[string]*Object{
+		"__eq__": newBuiltinFunction("__eq__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return True.ToObject(), nil
+		}).ToObject(),
+	}))
+	badCmpByEqType := newTestClass("BadEqCmp", []*Type{IntType}, newStringDict(map[string]*Object{
+		"__eq__": newBuiltinFunction("__eq__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(TypeErrorType, "uh oh")
+		}).ToObject(),
+	}))
+	badNonZeroType := newTestClass("BadNonZeroType", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__nonzero__": newBuiltinFunction("__nonzero__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(TypeErrorType, "uh oh")
+		}).ToObject(),
+	}))
+	worseCmpByEqType := newTestClass("WorseEqCmp", []*Type{IntType}, newStringDict(map[string]*Object{
+		"__eq__": newBuiltinFunction("__eq__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return newObject(badNonZeroType), nil
+		}).ToObject(),
+	}))
+	cmpNonIntResultType := newTestClass("CmpNonIntResult", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewStr("foo").ToObject(), nil
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		// Test `__cmp__` less than.
+		{args: wrapArgs(newObject(cmpLtType), None), want: NewInt(-1).ToObject()},
+		{args: wrapArgs(None, newObject(cmpGtType)), want: NewInt(-1).ToObject()},
+		// Test `__cmp__` equals.
+		{args: wrapArgs(newObject(cmpEqType), None), want: NewInt(0).ToObject()},
+		{args: wrapArgs(None, newObject(cmpEqType)), want: NewInt(0).ToObject()},
+		// Test `__cmp__` greater than.
+		{args: wrapArgs(newObject(cmpGtType), None), want: NewInt(1).ToObject()},
+		{args: wrapArgs(None, newObject(cmpLtType)), want: NewInt(1).ToObject()},
+		// Test `__cmp__` fallback to rich comparison.
+		{args: wrapArgs(newObject(cmpByEqType), None), want: NewInt(0).ToObject()},
+		{args: wrapArgs(None, newObject(cmpByEqType)), want: NewInt(0).ToObject()},
+		// Test bad `__cmp__` fallback to rich comparison.
+		{args: wrapArgs(newObject(badCmpByEqType), None), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		{args: wrapArgs(None, newObject(badCmpByEqType)), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		// Test bad `__cmp__` fallback to rich comparison where a bad object is returned from `__eq__`.
+		{args: wrapArgs(newObject(worseCmpByEqType), None), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		{args: wrapArgs(None, newObject(worseCmpByEqType)), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		// Test bad `__cmp__`.
+		{args: wrapArgs(newObject(badCmpType), None), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		{args: wrapArgs(None, newObject(badCmpType)), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		// Test bad `__cmp__` with non-int result.
+		{args: wrapArgs(newObject(cmpNonIntResultType), None), wantExc: mustCreateException(TypeErrorType, "an integer is required")},
+		{args: wrapArgs(None, newObject(cmpNonIntResultType)), wantExc: mustCreateException(TypeErrorType, "an integer is required")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(Compare), &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -336,6 +417,32 @@ func TestHash(t *testing.T) {
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(wrapFuncForTest(Hash), &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestHex(t *testing.T) {
+	badHex := newTestClass("badHex", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__hex__": newBuiltinFunction("__hex__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(123).ToObject(), nil
+		}).ToObject(),
+	}))
+	goodHex := newTestClass("goodHex", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__hex__": newBuiltinFunction("__hex__", func(f *Frame, _ Args, _ KWArgs) (*Object, *BaseException) {
+			return NewStr("0x123").ToObject(), nil
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		{args: wrapArgs(-123), want: NewStr("-0x7b").ToObject()},
+		{args: wrapArgs(123), want: NewStr("0x7b").ToObject()},
+		{args: wrapArgs(newObject(goodHex)), want: NewStr("0x123").ToObject()},
+		{args: wrapArgs(NewList()), wantExc: mustCreateException(TypeErrorType, "hex() argument can't be converted to hex")},
+		{args: wrapArgs(NewDict()), wantExc: mustCreateException(TypeErrorType, "hex() argument can't be converted to hex")},
+		{args: wrapArgs(newObject(badHex)), wantExc: mustCreateException(TypeErrorType, "__hex__ returned non-string (type int)")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(Hex), &cas); err != "" {
 			t.Error(err)
 		}
 	}
@@ -655,6 +762,32 @@ func TestInvokeKeywordArgs(t *testing.T) {
 	}
 }
 
+func TestOct(t *testing.T) {
+	badOct := newTestClass("badOct", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__oct__": newBuiltinFunction("__oct__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(123).ToObject(), nil
+		}).ToObject(),
+	}))
+	goodOct := newTestClass("goodOct", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__oct__": newBuiltinFunction("__oct__", func(f *Frame, _ Args, _ KWArgs) (*Object, *BaseException) {
+			return NewStr("0123").ToObject(), nil
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		{args: wrapArgs(-123), want: NewStr("-0173").ToObject()},
+		{args: wrapArgs(123), want: NewStr("0173").ToObject()},
+		{args: wrapArgs(newObject(goodOct)), want: NewStr("0123").ToObject()},
+		{args: wrapArgs(NewList()), wantExc: mustCreateException(TypeErrorType, "oct() argument can't be converted to oct")},
+		{args: wrapArgs(NewDict()), wantExc: mustCreateException(TypeErrorType, "oct() argument can't be converted to oct")},
+		{args: wrapArgs(newObject(badOct)), wantExc: mustCreateException(TypeErrorType, "__oct__ returned non-string (type int)")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(Oct), &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestPyPrint(t *testing.T) {
 	fun := wrapFuncForTest(func(f *Frame, args *Tuple, sep, end string) (string, *BaseException) {
 		var buf bytes.Buffer
@@ -780,6 +913,47 @@ func TestResolveGlobal(t *testing.T) {
 	}
 }
 
+func TestRichCompare(t *testing.T) {
+	badCmpType := newTestClass("BadCmp", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(TypeErrorType, "uh oh")
+		}).ToObject(),
+	}))
+	cmpEqType := newTestClass("BadCmp", []*Type{ObjectType}, newStringDict(map[string]*Object{
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NewInt(0).ToObject(), nil
+		}).ToObject(),
+	}))
+	cmpByEqType := newTestClass("Eq", []*Type{IntType}, newStringDict(map[string]*Object{
+		"__eq__": newBuiltinFunction("__eq__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return True.ToObject(), nil
+		}).ToObject(),
+		"__cmp__": newBuiltinFunction("__cmp__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return NotImplemented, nil
+		}).ToObject(),
+	}))
+	badCmpEqType := newTestClass("Eq", []*Type{IntType}, newStringDict(map[string]*Object{
+		"__eq__": newBuiltinFunction("__eq__", func(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+			return nil, f.RaiseType(TypeErrorType, "uh oh")
+		}).ToObject(),
+	}))
+	cases := []invokeTestCase{
+		// Test `__eq__` fallback to `__cmp__`.
+		{args: wrapArgs(newObject(cmpEqType), newObject(cmpEqType)), want: compareAllResultEq},
+		// Test `__cmp__` fallback to `__eq__`.
+		{args: wrapArgs(newObject(cmpByEqType), newObject(cmpByEqType)), want: compareAllResultEq},
+		// Test rich compare fallback to bad `__cmp__`.
+		{args: wrapArgs(newObject(badCmpType), newObject(badCmpType)), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+		// Test bad `__eq__` where the second object being compared is a subclass of the first.
+		{args: wrapArgs(NewInt(13).ToObject(), newObject(badCmpEqType)), wantExc: mustCreateException(TypeErrorType, "uh oh")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(compareAll, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestCheckLocal(t *testing.T) {
 	o := newObject(ObjectType)
 	cases := []invokeTestCase{
@@ -877,7 +1051,7 @@ func TestTie(t *testing.T) {
 			},
 			NewList(NewStr("foo").ToObject()).ToObject(),
 			nil,
-			mustCreateException(TypeErrorType, "need more than 1 values to unpack"),
+			mustCreateException(ValueErrorType, "need more than 1 values to unpack"),
 		},
 		{
 			TieTarget{Children: []TieTarget{{Target: &targets[0]}}},
@@ -907,6 +1081,38 @@ func TestTie(t *testing.T) {
 			t.Errorf("Tie(%+v, %v) raised %v, want %v", cas.t, cas.o, raised, cas.wantExc)
 		case checkInvokeResultReturnValueMismatch:
 			t.Errorf("Tie(%+v, %v) = %v, want %v", cas.t, cas.o, got, cas.want)
+		}
+	}
+}
+
+func TestToInt(t *testing.T) {
+	fun := wrapFuncForTest(func(f *Frame, o *Object) (*Tuple, *BaseException) {
+		i, raised := ToInt(f, o)
+		if raised != nil {
+			return nil, raised
+		}
+		return newTestTuple(i, i.Type()), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(42), want: newTestTuple(42, IntType).ToObject()},
+		{args: wrapArgs(big.NewInt(123)), want: newTestTuple(123, LongType).ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestToIntValue(t *testing.T) {
+	cases := []invokeTestCase{
+		{args: wrapArgs(42), want: NewInt(42).ToObject()},
+		{args: wrapArgs(big.NewInt(123)), want: NewInt(123).ToObject()},
+		{args: wrapArgs(overflowLong), wantExc: mustCreateException(OverflowErrorType, "Python int too large to convert to a Go int")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(wrapFuncForTest(ToIntValue), &cas); err != "" {
+			t.Error(err)
 		}
 	}
 }

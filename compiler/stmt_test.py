@@ -202,6 +202,36 @@ class StatementVisitorTest(unittest.TestCase):
         else:
           print 'bar'""")))
 
+  def testForElseBreakNotNested(self):
+    self.assertRaisesRegexp(
+        util.ParseError, "'continue' not in loop",
+        _ParseAndVisit, 'for i in (1,):\n  pass\nelse:\n  continue')
+
+  def testForElseContinueNotNested(self):
+    self.assertRaisesRegexp(
+        util.ParseError, "'continue' not in loop",
+        _ParseAndVisit, 'for i in (1,):\n  pass\nelse:\n  continue')
+
+  def testFunctionDecorator(self):
+    self.assertEqual((0, '<b>foo</b>\n'), _GrumpRun(textwrap.dedent("""\
+        def bold(fn):
+          return lambda: '<b>' + fn() + '</b>'
+        @bold
+        def foo():
+          return 'foo'
+        print foo()""")))
+
+  def testFunctionDecoratorWithArg(self):
+    self.assertEqual((0, '<b id=red>foo</b>\n'), _GrumpRun(textwrap.dedent("""\
+        def tag(name):
+          def bold(fn):
+            return lambda: '<b id=' + name + '>' + fn() + '</b>'
+          return bold
+        @tag('red')
+        def foo():
+          return 'foo'
+        print foo()""")))
+
   def testFunctionDef(self):
     self.assertEqual((0, 'bar baz\n'), _GrumpRun(textwrap.dedent("""\
         def foo(a, b):
@@ -331,6 +361,15 @@ class StatementVisitorTest(unittest.TestCase):
       node = mod.body[0]
       self.assertRaisesRegexp(util.ParseError, want_regexp,
                               stmt.import_from_future, node)
+
+  def testImportWildcardMemberRaises(self):
+    regexp = r'wildcard member import is not implemented: from foo import *'
+    self.assertRaisesRegexp(util.ParseError, regexp, _ParseAndVisit,
+                            'from foo import *')
+    regexp = (r'wildcard member import is not '
+              r'implemented: from __go__.foo import *')
+    self.assertRaisesRegexp(util.ParseError, regexp, _ParseAndVisit,
+                            'from __go__.foo import *')
 
   def testVisitFuture(self):
     testcases = [

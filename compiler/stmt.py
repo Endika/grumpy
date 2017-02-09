@@ -29,6 +29,14 @@ from grumpy.compiler import util
 _NATIVE_MODULE_PREFIX = '__go__.'
 _NATIVE_TYPE_PREFIX = 'type_'
 
+# Partial list of known vcs for go module import
+# Full list can be found at https://golang.org/src/cmd/go/vcs.go
+# TODO: Use official vcs.go module instead of partial list
+_KNOWN_VCS = [
+    'golang.org', 'github.com', 'bitbucket.org', 'git.apache.org',
+    'git.openstack.org', 'launchpad.net'
+]
+
 _nil_expr = expr.nil_expr
 
 
@@ -165,6 +173,8 @@ class StatementVisitor(ast.NodeVisitor):
         self._tie_target(target, value.expr)
 
   def visit_Break(self, node):
+    if not self.block.loop_stack:
+      raise util.ParseError(node, "'break' not in loop")
     self._write_py_context(node.lineno)
     self.writer.write('goto Label{}'.format(self.block.top_loop().end_label))
 
@@ -234,6 +244,8 @@ class StatementVisitor(ast.NodeVisitor):
         self.block.bind_var(self.writer, node.name, type_.expr)
 
   def visit_Continue(self, node):
+    if not self.block.loop_stack:
+      raise util.ParseError(node, "'continue' not in loop")
     self._write_py_context(node.lineno)
     self.writer.write('goto Label{}'.format(self.block.top_loop().start_label))
 
@@ -288,18 +300,25 @@ class StatementVisitor(ast.NodeVisitor):
       self._visit_each(node.body)
       self.writer.write('goto Label{}'.format(loop.start_label))
 
+    self.block.pop_loop()
     if node.orelse:
       self.writer.write_label(orelse_label)
       self._visit_each(node.orelse)
     # Avoid label "defined and not used" in case there's no break statements.
     self.writer.write('goto Label{}'.format(loop.end_label))
     self.writer.write_label(loop.end_label)
-    self.block.pop_loop()
 
   def visit_FunctionDef(self, node):
-    self._write_py_context(node.lineno)
+    self._write_py_context(node.lineno + len(node.decorator_list))
     func = self.expr_visitor.visit_function_inline(node)
     self.block.bind_var(self.writer, node.name, func.expr)
+    while node.decorator_list:
+      decorator = node.decorator_list.pop()
+      wrapped = ast.Name(node.name, ast.Load)
+      decorated = ast.Call(decorator, [wrapped], [], None, None)
+      target = ast.Assign([wrapped], decorated)
+      target.lineno = node.lineno + len(node.decorator_list)
+      self.visit_Assign(target)
 
   def visit_Global(self, node):
     self._write_py_context(node.lineno)
@@ -356,6 +375,12 @@ class StatementVisitor(ast.NodeVisitor):
         self.block.bind_var(self.writer, asname, mod.expr)
 
   def visit_ImportFrom(self, node):
+    # Wildcard imports are not yet supported.
+    for alias in node.names:
+      if alias.name == '*':
+        msg = 'wildcard member import is not implemented: from %s import %s' % (
+            node.module, alias.name)
+        raise util.ParseError(node, msg)
     self._write_py_context(node.lineno)
     if node.module.startswith(_NATIVE_MODULE_PREFIX):
       values = [alias.name for alias in node.names]
@@ -684,7 +709,17 @@ class StatementVisitor(ast.NodeVisitor):
 
   def _import_native(self, name, values):
     reflect_package = self.block.add_native_import('reflect')
-    package_name = name[len(_NATIVE_MODULE_PREFIX):].replace('.', '/')
+    import_name = name[len(_NATIVE_MODULE_PREFIX):]
+    # Work-around for importing go module from VCS
+    # TODO: support bzr|git|hg|svn from any server
+    package_name = None
+    for x in _KNOWN_VCS:
+      if import_name.startswith(x):
+        package_name = x + import_name[len(x):].replace('.', '/')
+        break
+    if not package_name:
+      package_name = import_name.replace('.', '/')
+
     package = self.block.add_native_import(package_name)
     mod = self.block.alloc_temp()
     with self.block.alloc_temp('map[string]*πg.Object') as members:

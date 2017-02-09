@@ -114,7 +114,9 @@ func (l *List) Sort(f *Frame) (raised *BaseException) {
 		}
 		raised = sorter.raised
 	}()
-	sort.Sort(sorter)
+	// Python guarantees stability.  See note (9) in:
+	// https://docs.python.org/2/library/stdtypes.html#mutable-sequence-types
+	sort.Stable(sorter)
 	return nil
 }
 
@@ -159,6 +161,53 @@ func listAppend(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
 	}
 	toListUnsafe(args[0]).Append(args[1])
 	return None, nil
+}
+
+func listCount(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "count", args, ListType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	return seqCount(f, args[0], args[1])
+}
+
+func listRemove(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
+	if raised := checkMethodArgs(f, "remove", args, ListType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	l := toListUnsafe(args[0])
+	l.mutex.Lock()
+	value := args[1]
+	found := false
+	var raised *BaseException
+	for i, elem := range l.elems {
+		var eq *Object
+		if eq, raised = Eq(f, elem, value); raised != nil {
+			break
+		}
+		if found, raised = IsTrue(f, eq); raised != nil {
+			break
+		}
+		if found {
+			l.elems = append(l.elems[:i], l.elems[i+1:]...)
+			break
+		}
+	}
+	l.mutex.Unlock()
+	if raised != nil {
+		return nil, raised
+	}
+	if !found {
+		return nil, f.RaiseType(ValueErrorType, "list.remove(x): x not in list")
+	}
+	return None, nil
+}
+
+func listExtend(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	if argc != 2 {
+		return nil, f.RaiseType(TypeErrorType, fmt.Sprintf("extend() takes exactly one argument (%d given)", argc))
+	}
+	return listIAdd(f, args[0], args[1])
 }
 
 func listContains(f *Frame, l, v *Object) (*Object, *BaseException) {
@@ -289,6 +338,41 @@ func listNE(f *Frame, v, w *Object) (*Object, *BaseException) {
 	return listCompare(f, toListUnsafe(v), w, NE)
 }
 
+func listPop(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	expectedTypes := []*Type{ListType, ObjectType}
+	if argc == 1 {
+		expectedTypes = expectedTypes[:1]
+	}
+	if raised := checkMethodArgs(f, "pop", args, expectedTypes...); raised != nil {
+		return nil, raised
+	}
+	i := -1
+	if argc == 2 {
+		var raised *BaseException
+		i, raised = ToIntValue(f, args[1])
+		if raised != nil {
+			return nil, raised
+		}
+	}
+	l := toListUnsafe(args[0])
+	l.mutex.Lock()
+	numElems := len(l.elems)
+	if i < 0 {
+		i += numElems
+	}
+	var item *Object
+	var raised *BaseException
+	if i >= numElems || i < 0 {
+		raised = f.RaiseType(IndexErrorType, "list index out of range")
+	} else {
+		item = l.elems[i]
+		l.elems = append(l.elems[:i], l.elems[i+1:]...)
+	}
+	l.mutex.Unlock()
+	return item, raised
+}
+
 func listRepr(f *Frame, o *Object) (*Object, *BaseException) {
 	l := toListUnsafe(o)
 	if f.reprEnter(l.ToObject()) {
@@ -334,10 +418,25 @@ func listSetItem(f *Frame, o, key, value *Object) *BaseException {
 	return f.RaiseType(TypeErrorType, fmt.Sprintf("list indices must be integers, not %s", key.Type().Name()))
 }
 
+func listSort(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	// TODO: Support (cmp=None, key=None, reverse=False)
+	if raised := checkMethodArgs(f, "sort", args, ListType); raised != nil {
+		return nil, raised
+	}
+	l := toListUnsafe(args[0])
+	l.Sort(f)
+	return None, nil
+}
+
 func initListType(dict map[string]*Object) {
 	dict["append"] = newBuiltinFunction("append", listAppend).ToObject()
+	dict["count"] = newBuiltinFunction("count", listCount).ToObject()
+	dict["extend"] = newBuiltinFunction("extend", listExtend).ToObject()
 	dict["insert"] = newBuiltinFunction("insert", listInsert).ToObject()
+	dict["pop"] = newBuiltinFunction("pop", listPop).ToObject()
+	dict["remove"] = newBuiltinFunction("remove", listRemove).ToObject()
 	dict["reverse"] = newBuiltinFunction("reverse", listReverse).ToObject()
+	dict["sort"] = newBuiltinFunction("sort", listSort).ToObject()
 	ListType.slots.Add = &binaryOpSlot{listAdd}
 	ListType.slots.Contains = &binaryOpSlot{listContains}
 	ListType.slots.Eq = &binaryOpSlot{listEq}

@@ -23,6 +23,34 @@ import (
 	"testing"
 )
 
+func TestBuiltinDelAttr(t *testing.T) {
+	f := NewRootFrame()
+	delattr := mustNotRaise(Builtins.GetItemString(f, "delattr"))
+	fooType := newTestClass("Foo", []*Type{ObjectType}, NewDict())
+	fooForDelAttr := newObject(fooType)
+	fooValue := newObject(ObjectType)
+	mustNotRaise(nil, SetAttr(f, fooForDelAttr, NewStr("bar"), fooValue))
+	fun := wrapFuncForTest(func(f *Frame, args ...*Object) (*Object, *BaseException) {
+		result, raised := delattr.Call(f, args, nil)
+		if raised != nil {
+			return nil, raised
+		}
+		val, raised := GetAttr(f, args[0], toStrUnsafe(args[1]), None)
+		return newTestTuple(result, val == fooValue).ToObject(), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(fooForDelAttr, "bar"), want: newTestTuple(None, False.ToObject()).ToObject()},
+		{args: wrapArgs(fooForDelAttr, "baz"), wantExc: mustCreateException(AttributeErrorType, "'Foo' object has no attribute 'baz'")},
+		{args: wrapArgs(fooForDelAttr), wantExc: mustCreateException(TypeErrorType, "'delattr' requires 2 arguments")},
+		{args: wrapArgs(fooForDelAttr, "foo", "bar"), wantExc: mustCreateException(TypeErrorType, "'delattr' requires 2 arguments")},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
 func TestBuiltinFuncs(t *testing.T) {
 	f := NewRootFrame()
 	objectDir := ObjectType.dict.Keys(f)
@@ -164,6 +192,25 @@ func TestBuiltinFuncs(t *testing.T) {
 		{f: "iter", args: wrapArgs(42), wantExc: mustCreateException(TypeErrorType, "'int' object is not iterable")},
 		{f: "len", args: wrapArgs(newTestList(1, 2, 3)), want: NewInt(3).ToObject()},
 		{f: "len", args: wrapArgs(), wantExc: mustCreateException(TypeErrorType, "'len' requires 1 arguments")},
+		{f: "map", args: wrapArgs(), wantExc: mustCreateException(TypeErrorType, "map() requires at least two args")},
+		{f: "map", args: wrapArgs(StrType), wantExc: mustCreateException(TypeErrorType, "map() requires at least two args")},
+		{f: "map", args: wrapArgs(None, newTestList()), want: newTestList().ToObject()},
+		{f: "map", args: wrapArgs(None, newTestList(1, 2, 3)), want: newTestList(1, 2, 3).ToObject()},
+		{f: "map", args: wrapArgs(None, newTestDict("foo", 1, "bar", 3)), want: newTestList("foo", "bar").ToObject()},
+		{f: "map", args: wrapArgs(None, None), wantExc: mustCreateException(TypeErrorType, "'NoneType' object is not iterable")},
+		{f: "map", args: wrapArgs(StrType, None), wantExc: mustCreateException(TypeErrorType, "'NoneType' object is not iterable")},
+		{f: "map", args: wrapArgs(StrType, newTestList(), None), wantExc: mustCreateException(TypeErrorType, "'NoneType' object is not iterable")},
+		{f: "map", args: wrapArgs(newTestList(), newTestList(1, 2, 3)), wantExc: mustCreateException(TypeErrorType, "'list' object is not callable")},
+		{f: "map", args: wrapArgs(StrType, newTestList()), want: newTestList().ToObject()},
+		{f: "map", args: wrapArgs(StrType, newTestList(1, 2, 3)), want: newTestList("1", "2", "3").ToObject()},
+		{f: "map", args: wrapArgs(StrType, newTestList(-1, -2, -3)), want: newTestList("-1", "-2", "-3").ToObject()},
+		{f: "map", args: wrapArgs(IntType, newTestList("1", "2", "3")), want: newTestList(1, 2, 3).ToObject()},
+		{f: "map", args: wrapArgs(IntType, newTestList("-1", "-2", "-3")), want: newTestList(-1, -2, -3).ToObject()},
+		{f: "map", args: wrapArgs(IntType, "123"), want: newTestList(1, 2, 3).ToObject()},
+		{f: "map", args: wrapArgs(IntType, newTestDict("1", "11", "2", "22")), want: newTestList(1, 2).ToObject()},
+		{f: "map", args: wrapArgs(IntType, 1), wantExc: mustCreateException(TypeErrorType, "'int' object is not iterable")},
+		{f: "map", args: wrapArgs(1, newTestList(1, 2, 3)), wantExc: mustCreateException(TypeErrorType, "'int' object is not callable")},
+		{f: "map", args: wrapArgs(StrType, newTestList(), 1), wantExc: mustCreateException(TypeErrorType, "'int' object is not iterable")},
 		{f: "max", args: wrapArgs(2, 3, 1), want: NewInt(3).ToObject()},
 		{f: "max", args: wrapArgs("bar", "foo"), want: NewStr("foo").ToObject()},
 		{f: "max", args: wrapArgs(newTestList(2, 3, 1)), want: NewInt(3).ToObject()},
@@ -228,11 +275,31 @@ func TestBuiltinFuncs(t *testing.T) {
 		{f: "repr", args: wrapArgs(NewUnicode("abc")), want: NewStr("u'abc'").ToObject()},
 		{f: "repr", args: wrapArgs(newTestTuple("foo", "bar")), want: NewStr("('foo', 'bar')").ToObject()},
 		{f: "repr", args: wrapArgs("a", "b", "c"), wantExc: mustCreateException(TypeErrorType, "'repr' requires 1 arguments")},
+		{f: "sorted", args: wrapArgs(NewList()), want: NewList().ToObject()},
+		{f: "sorted", args: wrapArgs(newTestList("foo", "bar")), want: newTestList("bar", "foo").ToObject()},
+		{f: "sorted", args: wrapArgs(newTestList(true, false)), want: newTestList(false, true).ToObject()},
+		{f: "sorted", args: wrapArgs(newTestList(1, 2, 0, 3)), want: newTestRange(4).ToObject()},
+		{f: "sorted", args: wrapArgs(newTestRange(100)), want: newTestRange(100).ToObject()},
+		{f: "sorted", args: wrapArgs(newTestTuple(1, 2, 0, 3)), want: newTestRange(4).ToObject()},
+		{f: "sorted", args: wrapArgs(newTestDict("foo", 1, "bar", 2)), want: newTestList("bar", "foo").ToObject()},
+		{f: "sorted", args: wrapArgs(1), wantExc: mustCreateException(TypeErrorType, "'int' object is not iterable")},
+		{f: "sorted", args: wrapArgs(newTestList("foo", "bar"), 2), wantExc: mustCreateException(TypeErrorType, "'sorted' requires 1 arguments")},
 		{f: "unichr", args: wrapArgs(0), want: NewUnicode("\x00").ToObject()},
 		{f: "unichr", args: wrapArgs(65), want: NewStr("A").ToObject()},
 		{f: "unichr", args: wrapArgs(0x120000), wantExc: mustCreateException(ValueErrorType, "unichr() arg not in range(0x10ffff)")},
 		{f: "unichr", args: wrapArgs(-1), wantExc: mustCreateException(ValueErrorType, "unichr() arg not in range(0x10ffff)")},
 		{f: "unichr", args: wrapArgs(), wantExc: mustCreateException(TypeErrorType, "'unichr' requires 1 arguments")},
+		{f: "zip", args: wrapArgs(), want: newTestList().ToObject()},
+		{f: "zip", args: wrapArgs(newTestTuple()), want: newTestList().ToObject()},
+		{f: "zip", args: wrapArgs(newTestList()), want: newTestList().ToObject()},
+		{f: "zip", args: wrapArgs(newTestList(1)), want: newTestList(newTestTuple(1).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(newTestList(1, 2, 3)), want: newTestList(newTestTuple(1).ToObject(), newTestTuple(2).ToObject(), newTestTuple(3).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(newTestRange(3)), want: newTestList(newTestTuple(0).ToObject(), newTestTuple(1).ToObject(), newTestTuple(2).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(newTestTuple(1, 2, 3), newTestTuple(4, 5, 6)), want: NewList(newTestTuple(1, 4).ToObject(), newTestTuple(2, 5).ToObject(), newTestTuple(3, 6).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(newTestTuple(1, 2, 3), newTestTuple(4, 5)), want: NewList(newTestTuple(1, 4).ToObject(), newTestTuple(2, 5).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(newTestTuple(1, 2), newTestTuple(4, 5, 5)), want: NewList(newTestTuple(1, 4).ToObject(), newTestTuple(2, 5).ToObject()).ToObject()},
+		{f: "zip", args: wrapArgs(1), wantExc: mustCreateException(TypeErrorType, "'int' object is not iterable")},
+		{f: "zip", args: wrapArgs(newTestDict("foo", 1, "bar", 2)), want: newTestList(newTestTuple("foo").ToObject(), newTestTuple("bar").ToObject()).ToObject()},
 	}
 	for _, cas := range cases {
 		fun := mustNotRaise(Builtins.GetItemString(NewRootFrame(), cas.f))
@@ -257,6 +324,13 @@ func TestBuiltinGlobals(t *testing.T) {
 		t.Errorf("globals() = %v, want %v", got, want)
 	case checkInvokeResultReturnValueMismatch:
 		t.Errorf("globals() raised %v, want nil", raised)
+	}
+}
+
+func TestEllipsisRepr(t *testing.T) {
+	cas := invokeTestCase{args: wrapArgs(Ellipsis), want: NewStr("Ellipsis").ToObject()}
+	if err := runInvokeMethodTestCase(EllipsisType, "__repr__", &cas); err != "" {
+		t.Error(err)
 	}
 }
 
@@ -300,7 +374,7 @@ func captureStdout(f *Frame, fn func() *BaseException) (string, *BaseException) 
 func TestBuiltinPrint(t *testing.T) {
 	fun := wrapFuncForTest(func(f *Frame, args *Tuple, kwargs KWArgs) (string, *BaseException) {
 		return captureStdout(f, func() *BaseException {
-			_, raised := builtinPrint(newFrame(nil), args.elems, kwargs)
+			_, raised := builtinPrint(NewRootFrame(), args.elems, kwargs)
 			return raised
 		})
 	})
@@ -311,6 +385,36 @@ func TestBuiltinPrint(t *testing.T) {
 		{args: wrapArgs(newTestTuple("abc", 123), wrapKWArgs("sep", "")), want: NewStr("abc123\n").ToObject()},
 		{args: wrapArgs(newTestTuple("abc", 123), wrapKWArgs("end", "")), want: NewStr("abc 123").ToObject()},
 		{args: wrapArgs(newTestTuple("abc", 123), wrapKWArgs("sep", "XX", "end", "--")), want: NewStr("abcXX123--").ToObject()},
+	}
+	for _, cas := range cases {
+		if err := runInvokeTestCase(fun, &cas); err != "" {
+			t.Error(err)
+		}
+	}
+}
+
+func TestBuiltinSetAttr(t *testing.T) {
+	setattr := mustNotRaise(Builtins.GetItemString(NewRootFrame(), "setattr"))
+	fooType := newTestClass("Foo", []*Type{ObjectType}, newStringDict(map[string]*Object{}))
+	foo := newObject(fooType)
+	fun := wrapFuncForTest(func(f *Frame, args ...*Object) (*Object, *BaseException) {
+		result, raised := setattr.Call(f, args, nil)
+		if raised != nil {
+			return nil, raised
+		}
+		val, raised := GetAttr(f, args[0], toStrUnsafe(args[1]), nil)
+		if raised != nil {
+			return nil, raised
+		}
+		return newTestTuple(result, val).ToObject(), nil
+	})
+	cases := []invokeTestCase{
+		{args: wrapArgs(foo), wantExc: mustCreateException(TypeErrorType, "'setattr' requires 3 arguments")},
+		{args: wrapArgs(newObject(fooType), "foo", "bar"), want: newTestTuple(None, "bar").ToObject()},
+		{args: wrapArgs(newObject(fooType), "foo", 123), want: newTestTuple(None, 123).ToObject()},
+		{args: wrapArgs(foo, "foo"), wantExc: mustCreateException(TypeErrorType, "'setattr' requires 3 arguments")},
+		{args: wrapArgs(foo, "foo", 123, None), wantExc: mustCreateException(TypeErrorType, "'setattr' requires 3 arguments")},
+		{args: wrapArgs(foo, 123, 123), wantExc: mustCreateException(TypeErrorType, "'setattr' requires a 'str' object but received a \"int\"")},
 	}
 	for _, cas := range cases {
 		if err := runInvokeTestCase(fun, &cas); err != "" {

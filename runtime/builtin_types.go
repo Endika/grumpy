@@ -27,6 +27,11 @@ var (
 	builtinStr = NewStr("__builtin__")
 	// ExceptionTypes contains all builtin exception types.
 	ExceptionTypes []*Type
+	// EllipsisType is the object representing the Python 'ellipsis' type
+	EllipsisType = newSimpleType("ellipsis", ObjectType)
+	// Ellipsis is the singleton ellipsis object representing the Python
+	// 'Ellipsis' object.
+	Ellipsis = &Object{typ: EllipsisType}
 	// NoneType is the object representing the Python 'NoneType' type.
 	NoneType = newSimpleType("NoneType", ObjectType)
 	// None is the singleton NoneType object representing the Python 'None'
@@ -44,8 +49,17 @@ var (
 	UnboundLocal = newObject(unboundLocalType)
 )
 
+func ellipsisRepr(*Frame, *Object) (*Object, *BaseException) {
+	return NewStr("Ellipsis").ToObject(), nil
+}
+
 func noneRepr(*Frame, *Object) (*Object, *BaseException) {
 	return NewStr("None").ToObject(), nil
+}
+
+func initEllipsisType(map[string]*Object) {
+	EllipsisType.flags &= ^(typeFlagInstantiable | typeFlagBasetype)
+	EllipsisType.slots.Repr = &unaryOpSlot{ellipsisRepr}
 }
 
 func initNoneType(map[string]*Object) {
@@ -86,10 +100,14 @@ var builtinTypes = map[*Type]*builtinTypeInfo{
 	BoolType:                      {init: initBoolType, global: true},
 	BytesWarningType:              {global: true},
 	CodeType:                      {},
+	ComplexType:                   {init: initComplexType, global: true},
+	ClassMethodType:               {init: initClassMethodType, global: true},
 	DeprecationWarningType:        {global: true},
 	dictItemIteratorType:          {init: initDictItemIteratorType},
 	dictKeyIteratorType:           {init: initDictKeyIteratorType},
+	dictValueIteratorType:         {init: initDictValueIteratorType},
 	DictType:                      {init: initDictType, global: true},
+	EllipsisType:                  {init: initEllipsisType, global: true},
 	enumerateType:                 {init: initEnumerateType, global: true},
 	EnvironmentErrorType:          {global: true},
 	ExceptionType:                 {global: true},
@@ -114,6 +132,7 @@ var builtinTypes = map[*Type]*builtinTypeInfo{
 	MethodType:                    {init: initMethodType},
 	ModuleType:                    {init: initModuleType},
 	NameErrorType:                 {global: true},
+	nativeBoolMetaclassType:       {init: initNativeBoolMetaclassType},
 	nativeFuncType:                {init: initNativeFuncType},
 	nativeMetaclassType:           {init: initNativeMetaclassType},
 	nativeSliceType:               {init: initNativeSliceType},
@@ -191,6 +210,35 @@ func builtinAbs(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	return Abs(f, args[0])
 }
 
+func builtinMapFn(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	if argc < 2 {
+		return nil, f.RaiseType(TypeErrorType, "map() requires at least two args")
+	}
+	result := make([]*Object, 0, 2)
+	z, raised := zipLongest(f, args[1:])
+	if raised != nil {
+		return nil, raised
+	}
+	for _, tuple := range z {
+		if args[0] == None {
+			if argc == 2 {
+				result = append(result, tuple[0])
+			} else {
+				result = append(result, NewTuple(tuple...).ToObject())
+			}
+		} else {
+			ret, raised := args[0].Call(f, tuple, nil)
+			if raised != nil {
+				return nil, raised
+			}
+			result = append(result, ret)
+		}
+	}
+
+	return NewList(result...).ToObject(), nil
+}
+
 func builtinAll(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkFunctionArgs(f, "all", args, ObjectType); raised != nil {
 		return nil, raised
@@ -264,6 +312,20 @@ func builtinChr(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	return NewStr(string([]byte{byte(i)})).ToObject(), nil
 }
 
+func builtinCmp(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkFunctionArgs(f, "cmp", args, ObjectType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	return Compare(f, args[0], args[1])
+}
+
+func builtinDelAttr(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkFunctionArgs(f, "delattr", args, ObjectType, StrType); raised != nil {
+		return nil, raised
+	}
+	return None, DelAttr(f, args[0], toStrUnsafe(args[1]))
+}
+
 func builtinDir(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
 	// TODO: Support __dir__.
 	if raised := checkFunctionArgs(f, "dir", args, ObjectType); raised != nil {
@@ -298,6 +360,7 @@ func builtinFrame(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkFunctionArgs(f, "__frame__", args); raised != nil {
 		return nil, raised
 	}
+	f.taken = true
 	return f.ToObject(), nil
 }
 
@@ -354,19 +417,7 @@ func builtinHex(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkFunctionArgs(f, "hex", args, ObjectType); raised != nil {
 		return nil, raised
 	}
-	if method, raised := args[0].typ.mroLookup(f, NewStr("__hex__")); raised != nil {
-		return nil, raised
-	} else if method != nil {
-		return method.Call(f, args, nil)
-	}
-	if !args[0].isInstance(IntType) && !args[0].isInstance(LongType) {
-		return nil, f.RaiseType(TypeErrorType, "hex() argument can't be converted to hex")
-	}
-	s := numberToBase("0x", 16, args[0])
-	if args[0].isInstance(LongType) {
-		s += "L"
-	}
-	return NewStr(s).ToObject(), nil
+	return Hex(f, args[0])
 }
 
 func builtinID(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
@@ -410,7 +461,10 @@ func builtinLen(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
 		return nil, raised
 	}
 	ret, raised := Len(f, args[0])
-	return ret.ToObject(), raised
+	if raised != nil {
+		return nil, raised
+	}
+	return ret.ToObject(), nil
 }
 
 func builtinMax(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
@@ -440,23 +494,7 @@ func builtinOct(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkFunctionArgs(f, "oct", args, ObjectType); raised != nil {
 		return nil, raised
 	}
-	if method, raised := args[0].typ.mroLookup(f, NewStr("__oct__")); raised != nil {
-		return nil, raised
-	} else if method != nil {
-		return method.Call(f, args, nil)
-	}
-	if !args[0].isInstance(IntType) && !args[0].isInstance(LongType) {
-		return nil, f.RaiseType(TypeErrorType, "oct() argument can't be converted to oct")
-	}
-	s := numberToBase("0", 8, args[0])
-	if args[0].isInstance(LongType) {
-		s += "L"
-	}
-	// For oct(0), return "0", not "00".
-	if s == "00" {
-		s = "0"
-	}
-	return NewStr(s).ToObject(), nil
+	return Oct(f, args[0])
 }
 
 func builtinOpen(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
@@ -532,6 +570,26 @@ func builtinRepr(f *Frame, args Args, kwargs KWArgs) (*Object, *BaseException) {
 	return s.ToObject(), nil
 }
 
+func builtinSetAttr(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	if raised := checkFunctionArgs(f, "setattr", args, ObjectType, StrType, ObjectType); raised != nil {
+		return nil, raised
+	}
+	return None, SetAttr(f, args[0], toStrUnsafe(args[1]), args[2])
+}
+
+func builtinSorted(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	// TODO: Support (cmp=None, key=None, reverse=False)
+	if raised := checkFunctionArgs(f, "sorted", args, ObjectType); raised != nil {
+		return nil, raised
+	}
+	result, raised := ListType.Call(f, Args{args[0]}, nil)
+	if raised != nil {
+		return nil, raised
+	}
+	toListUnsafe(result).Sort(f)
+	return result, nil
+}
+
 func builtinUniChr(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	if raised := checkFunctionArgs(f, "unichr", args, IntType); raised != nil {
 		return nil, raised
@@ -543,6 +601,36 @@ func builtinUniChr(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
 	return NewUnicodeFromRunes([]rune{rune(i)}).ToObject(), nil
 }
 
+func builtinZip(f *Frame, args Args, _ KWArgs) (*Object, *BaseException) {
+	argc := len(args)
+	if argc == 0 {
+		return NewList().ToObject(), nil
+	}
+	result := make([]*Object, 0, 2)
+	iters, raised := initIters(f, args)
+	if raised != nil {
+		return nil, raised
+	}
+
+Outer:
+	for {
+		elems := make([]*Object, argc)
+		for i, iter := range iters {
+			elem, raised := Next(f, iter)
+			if raised != nil {
+				if raised.isInstance(StopIterationType) {
+					break Outer
+				}
+				f.RestoreExc(nil, nil)
+				return nil, raised
+			}
+			elems[i] = elem
+		}
+		result = append(result, NewTuple(elems...).ToObject())
+	}
+	return NewList(result...).ToObject(), nil
+}
+
 func init() {
 	builtinMap := map[string]*Object{
 		"__frame__":      newBuiltinFunction("__frame__", builtinFrame).ToObject(),
@@ -552,7 +640,10 @@ func init() {
 		"bin":            newBuiltinFunction("bin", builtinBin).ToObject(),
 		"callable":       newBuiltinFunction("callable", builtinCallable).ToObject(),
 		"chr":            newBuiltinFunction("chr", builtinChr).ToObject(),
+		"cmp":            newBuiltinFunction("cmp", builtinCmp).ToObject(),
+		"delattr":        newBuiltinFunction("delattr", builtinDelAttr).ToObject(),
 		"dir":            newBuiltinFunction("dir", builtinDir).ToObject(),
+		"Ellipsis":       Ellipsis,
 		"False":          False.ToObject(),
 		"getattr":        newBuiltinFunction("getattr", builtinGetAttr).ToObject(),
 		"globals":        newBuiltinFunction("globals", builtinGlobals).ToObject(),
@@ -564,6 +655,7 @@ func init() {
 		"issubclass":     newBuiltinFunction("issubclass", builtinIsSubclass).ToObject(),
 		"iter":           newBuiltinFunction("iter", builtinIter).ToObject(),
 		"len":            newBuiltinFunction("len", builtinLen).ToObject(),
+		"map":            newBuiltinFunction("map", builtinMapFn).ToObject(),
 		"max":            newBuiltinFunction("max", builtinMax).ToObject(),
 		"min":            newBuiltinFunction("min", builtinMin).ToObject(),
 		"next":           newBuiltinFunction("next", builtinNext).ToObject(),
@@ -575,8 +667,11 @@ func init() {
 		"print":          newBuiltinFunction("print", builtinPrint).ToObject(),
 		"range":          newBuiltinFunction("range", builtinRange).ToObject(),
 		"repr":           newBuiltinFunction("repr", builtinRepr).ToObject(),
+		"setattr":        newBuiltinFunction("setattr", builtinSetAttr).ToObject(),
+		"sorted":         newBuiltinFunction("sorted", builtinSorted).ToObject(),
 		"True":           True.ToObject(),
 		"unichr":         newBuiltinFunction("unichr", builtinUniChr).ToObject(),
+		"zip":            newBuiltinFunction("zip", builtinZip).ToObject(),
 	}
 	// Do type initialization in two phases so that we don't have to think
 	// about hard-to-understand cycles.
@@ -677,4 +772,58 @@ func numberToBase(prefix string, base int, o *Object) string {
 		return "-" + prefix + s[1:]
 	}
 	return prefix + s
+}
+
+// initIters return list of initiated Iter instances from the list of
+// iterables.
+func initIters(f *Frame, items []*Object) ([]*Object, *BaseException) {
+	l := len(items)
+	iters := make([]*Object, l)
+	for i, arg := range items {
+		iter, raised := Iter(f, arg)
+		if raised != nil {
+			return nil, raised
+		}
+		iters[i] = iter
+	}
+	return iters, nil
+}
+
+// zipLongest return the list of aggregates elements from each of the
+// iterables. If the iterables are of uneven length, missing values are
+// filled-in with None.
+func zipLongest(f *Frame, args Args) ([][]*Object, *BaseException) {
+	argc := len(args)
+	result := make([][]*Object, 0, 2)
+	iters, raised := initIters(f, args)
+	if raised != nil {
+		return nil, raised
+	}
+
+	for {
+		noItems := true
+		elems := make([]*Object, argc)
+		for i, iter := range iters {
+			if iter == nil {
+				continue
+			}
+			elem, raised := Next(f, iter)
+			if raised != nil {
+				if raised.isInstance(StopIterationType) {
+					iters[i] = nil
+					elems[i] = None
+					continue
+				}
+				f.RestoreExc(nil, nil)
+				return nil, raised
+			}
+			noItems = false
+			elems[i] = elem
+		}
+		if noItems {
+			break
+		}
+		result = append(result, elems)
+	}
+	return result, nil
 }

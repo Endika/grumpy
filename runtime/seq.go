@@ -64,13 +64,15 @@ func seqCompare(f *Frame, elems1, elems2 []*Object, cmp binaryOpFunc) (*Object, 
 // object.
 func seqApply(f *Frame, seq *Object, fun func([]*Object, bool) *BaseException) *BaseException {
 	switch {
-	case seq.isInstance(ListType):
+	// Don't use fast path referencing the underlying slice directly for
+	// list and tuple subtypes. See comment in listextend in listobject.c.
+	case seq.typ == ListType:
 		l := toListUnsafe(seq)
 		l.mutex.RLock()
 		raised := fun(l.elems, true)
 		l.mutex.RUnlock()
 		return raised
-	case seq.isInstance(TupleType):
+	case seq.typ == TupleType:
 		return fun(toTupleUnsafe(seq).elems, true)
 	default:
 		elems := []*Object{}
@@ -125,6 +127,28 @@ func seqContains(f *Frame, iterable *Object, v *Object) (*Object, *BaseException
 		return nil, raised
 	}
 	return GetBool(foundEqItem).ToObject(), raised
+}
+
+func seqCount(f *Frame, iterable *Object, v *Object) (*Object, *BaseException) {
+	count := 0
+	raised := seqForEach(f, iterable, func(o *Object) *BaseException {
+		eq, raised := Eq(f, o, v)
+		if raised != nil {
+			return raised
+		}
+		t, raised := IsTrue(f, eq)
+		if raised != nil {
+			return raised
+		}
+		if t {
+			count++
+		}
+		return nil
+	})
+	if raised != nil {
+		return nil, raised
+	}
+	return NewInt(count).ToObject(), nil
 }
 
 func seqFindFirst(f *Frame, iterable *Object, pred func(*Object) (bool, *BaseException)) (bool, *BaseException) {
